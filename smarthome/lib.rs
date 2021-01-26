@@ -9,8 +9,7 @@ mod smarthome {
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum Error {
         DevDoesNotExist,
-        WrongDevPasswordHash,
-        DeviceAlreadyClaimed,
+        DevExists,
     }
 
     type DeviceId = AccountId;
@@ -21,7 +20,7 @@ mod smarthome {
         traits::{PackedLayout, SpreadLayout},
     };
 
-    #[derive(scale::Encode, scale::Decode, SpreadLayout, PackedLayout, Copy)]
+    #[derive(scale::Encode, scale::Decode, SpreadLayout, PackedLayout)]
     #[cfg_attr(
         feature = "std",
         derive(Debug, scale_info::TypeInfo, ink_storage::traits::StorageLayout)
@@ -45,55 +44,45 @@ mod smarthome {
         /// Constructor that initializes the `bool` value to the given `init_value`.
         #[ink(constructor)]
         pub fn new() -> Self {
-            let owner = Self::env().caller;
+            let ceo = Self::env().caller();
             Self {
-                devs: StorageHashMap::new(),
-                owner_to_dev: StorageHashMap::new(),
-                owner_devs_count: StorageHashMap::new(),
+                ceo,
+                devs: StorageHashMap::default(),
+                owner_to_dev: StorageHashMap::default(),
+                owner_devs_count: StorageHashMap::default(),
             }
         }
 
         #[ink(message)]
-        pub fn add_new_device(&mut self, owner: AccountId) {
-            let devId = self.env().caller;
-            let dev = self.devs.get(devId);
-            match dev {
-                Some(d) => d,
-                None => Self::mint_device(devId),
-            };
-
-            if Self::device_has_owner(devId) {
-                return Err(Error::DeviceAlreadyClaimed);
+        pub fn add_new_device(&mut self, owner: AccountId) -> Result<()> {
+            let dev_id = self.env().caller();
+            let dev_opt = self.devs.get(&dev_id);
+            if dev_opt.is_some() {
+                return Err(Error::DevExists);
             }
-            // self.devs.insert()
-            Ok(dev);
+            let _ = self.mint_device(dev_id, owner);
+
+            Ok(())
         }
 
         /// Get the number of devices for an account
-        pub fn device_count(&mut self) -> Result<u32> {
-            let owner = self.env().caller();
-            *(self.owner_devs_count.get(&owner).unwrap_or(&0))
+        pub fn device_count(&mut self, owner: AccountId) -> Result<u32> {
+            Ok(*(self.owner_devs_count.get(&owner).unwrap_or(&0)))
         }
 
-        fn mint_device(&self, devId: DeviceId, owner: AccountId) -> Dev {
-            assert!(self.devs.get(devId) == None);
+        fn mint_device(&mut self, dev_id: DeviceId, owner: AccountId) {
+            assert!(self.devs.get(&dev_id).is_none());
             let dev = Dev {
                 state: false,
                 owner: Some(owner),
             };
 
-            self.devs.insert(devId, dev);
+            self.devs.insert(dev_id, dev);
 
             let owner_dev_count = *(self.owner_devs_count.get(&owner).unwrap_or(&0));
 
-            self.owner_to_dev
-                .insert((owner, owner_dev_count), device_id);
+            self.owner_to_dev.insert((owner, owner_dev_count), dev_id);
             self.owner_devs_count.insert(owner, owner_dev_count + 1);
-            return dev;
-        }
-
-        fn dev_pass_match(dev: &Dev, h1: Hash) {
-            assert!(dev.pass_hash == h1);
         }
 
         fn device_has_owner(dev: &Dev) -> bool {
@@ -106,24 +95,55 @@ mod smarthome {
     /// The below code is technically just normal Rust code.
     #[cfg(test)]
     mod tests {
+        use ink_lang as ink;
         /// Imports all the definitions from the outer scope so we can use them here.
         use super::*;
+        use ink_env::test;
+        type Accounts = test::DefaultAccounts<Environment>;
+        fn default_accounts() -> Accounts {
+            test::default_accounts().expect("Test environment is expected to be initialized.")
+        }
+
+        // Return the callee
+        fn set_sender(sender: AccountId) -> AccountId {
+            let callee =
+                ink_env::account_id::<ink_env::DefaultEnvironment>().unwrap_or([0x0; 32].into());
+            test::push_execution_context::<Environment>(
+                sender,
+                callee,
+                1000000,
+                1000000,
+                test::CallData::new(ink_env::call::Selector::new([0x00; 4])), // dummy
+            );
+            return callee;
+        }
+
+        fn undo_set_sender() {
+            test::pop_execution_context();
+        }
 
         /// We test if the default constructor does its job.
-        #[test]
+        #[ink::test]
         fn default_works() {
-            let smarthome = Smarthome::new();
-            // assert_eq!(smarthome.get(), false);
+            let _ = Smarthome::new();
         }
 
         /// We test a simple use case of our contract.
-        #[test]
+        #[ink::test]
         fn add_device() {
+            let accounts = default_accounts();
+            let smarthome_item = accounts.bob;
             let mut smarthome = Smarthome::new();
 
-            // assert_eq!(smarthome.get(), false);
 
-            // assert_eq!(smarthome.get(), true);
+            // Change sender to the smart home item
+            let owner = set_sender(smarthome_item);
+            assert_eq!(smarthome.device_count(owner), Ok(0));
+            let _ = smarthome.add_new_device(owner);
+
+            // Change the sender back to the owner
+            undo_set_sender();
+            assert_eq!(smarthome.device_count(owner), Ok(1));
         }
     }
 }
