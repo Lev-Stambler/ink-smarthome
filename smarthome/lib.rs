@@ -10,13 +10,15 @@ mod smarthome {
     pub enum Error {
         DevDoesNotExist,
         DevExists,
+        NotDevOwner,
     }
 
-    type DeviceId = AccountId;
+    type DevId = AccountId;
+    type DevState = bool;
     pub type Result<T> = core::result::Result<T, Error>;
 
     use ink_storage::{
-        collections::{HashMap as StorageHashMap, Stash as StorageStash},
+        collections::HashMap as StorageHashMap,
         traits::{PackedLayout, SpreadLayout},
     };
 
@@ -26,18 +28,24 @@ mod smarthome {
         derive(Debug, scale_info::TypeInfo, ink_storage::traits::StorageLayout)
     )]
     struct Dev {
-        /// TODO: have Dev be a trait with different possible states depending on device type
-        state: bool,
+        state: DevState,
         owner: Option<AccountId>,
     }
 
     #[ink(storage)]
     pub struct Smarthome {
-        devs: StorageHashMap<DeviceId, Dev>,
+        devs: StorageHashMap<DevId, Dev>,
         /// The owner of a device and device index to the hash of a smart device
-        owner_to_dev: StorageHashMap<(AccountId, u32), DeviceId>,
+        owner_to_dev: StorageHashMap<(AccountId, u32), DevId>,
         owner_devs_count: StorageHashMap<AccountId, u32>,
         ceo: AccountId,
+    }
+
+    #[ink(event)]
+    pub struct StateChange {
+        #[ink(topic)]
+        device: DevId,
+        new_state: DevState,
     }
 
     impl Smarthome {
@@ -65,12 +73,32 @@ mod smarthome {
             Ok(())
         }
 
+        #[ink(message)]
+        pub fn change_state(&mut self, dev_id: DevId, new_state: DevState) -> Result<()> {
+            let dev = self.devs.get_mut(&dev_id).ok_or(Error::DevDoesNotExist)?;
+            Self::caller_is_owner(dev)?;
+            dev.state = new_state;
+            self.env().emit_event(StateChange {
+                device: dev_id,
+                new_state,
+            });
+            Ok(())
+        }
+
+        // TODO: test, add security
+        #[ink(message)]
+        pub fn get_state(&self, dev_id: DevId) -> Result<DevState> {
+            let dev = self.devs.get(&dev_id).ok_or(Error::DevDoesNotExist)?;
+            Ok(dev.state)
+        }
+
+        #[ink(message)]
         /// Get the number of devices for an account
-        pub fn device_count(&mut self, owner: AccountId) -> Result<u32> {
+        pub fn device_count(&self, owner: AccountId) -> Result<u32> {
             Ok(*(self.owner_devs_count.get(&owner).unwrap_or(&0)))
         }
 
-        fn mint_device(&mut self, dev_id: DeviceId, owner: AccountId) {
+        fn mint_device(&mut self, dev_id: DevId, owner: AccountId) {
             assert!(self.devs.get(&dev_id).is_none());
             let dev = Dev {
                 state: false,
@@ -88,6 +116,14 @@ mod smarthome {
         fn device_has_owner(dev: &Dev) -> bool {
             dev.owner != None
         }
+
+        fn caller_is_owner(dev: &Dev) -> Result<()> {
+            if dev.owner.unwrap_or(AccountId::default()) != Self::env().caller() {
+                Err(Error::NotDevOwner)
+            } else {
+                Ok(())
+            }
+        }
     }
 
     /// Unit tests in Rust are normally defined within such a `#[cfg(test)]`
@@ -95,10 +131,10 @@ mod smarthome {
     /// The below code is technically just normal Rust code.
     #[cfg(test)]
     mod tests {
-        use ink_lang as ink;
         /// Imports all the definitions from the outer scope so we can use them here.
         use super::*;
         use ink_env::test;
+        use ink_lang as ink;
         type Accounts = test::DefaultAccounts<Environment>;
         fn default_accounts() -> Accounts {
             test::default_accounts().expect("Test environment is expected to be initialized.")
@@ -128,22 +164,26 @@ mod smarthome {
             let _ = Smarthome::new();
         }
 
-        /// We test a simple use case of our contract.
-        #[ink::test]
-        fn add_device() {
-            let accounts = default_accounts();
-            let smarthome_item = accounts.bob;
-            let mut smarthome = Smarthome::new();
-
-
+        fn add_device(smarthome: &mut Smarthome, smarthome_item: DevId) {
             // Change sender to the smart home item
             let owner = set_sender(smarthome_item);
-            assert_eq!(smarthome.device_count(owner), Ok(0));
+            let dev_count = smarthome.device_count(owner).unwrap();
             let _ = smarthome.add_new_device(owner);
 
             // Change the sender back to the owner
             undo_set_sender();
-            assert_eq!(smarthome.device_count(owner), Ok(1));
+            assert_eq!(smarthome.device_count(owner), Ok(dev_count + 1));
+        }
+
+        #[ink::test]
+        fn add_and_test_device() {
+            let accounts = default_accounts();
+            let mut smarthome = Smarthome::new();
+            let smarthome_item = accounts.bob;
+            add_device(&mut smarthome, smarthome_item);
+
+            smarthome.change_state(smarthome_item, false);
+            // TODO: ensure change state worked
         }
     }
 }
